@@ -1,0 +1,626 @@
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local p = Players.LocalPlayer
+local character = p.Character or p.CharacterAdded:Wait()
+local hrp = character:WaitForChild("HumanoidRootPart")
+local cam = Workspace.CurrentCamera
+
+p.CharacterAdded:Connect(function(c)
+	character = c
+	hrp = c:WaitForChild("HumanoidRootPart")
+end)
+
+-- ==================== SHARED VARIABLES ====================
+local PICKUP_RADIUS = 50
+local DISTANCE = 10
+local ORBIT_SPEED = 2
+
+-- Forward declaration for inputs to keep them synced
+local distInput1, distInput2
+
+-- ==================== PAGE 1 VARIABLES ====================
+local farmItems = false
+local clickSpam = false
+local ghostCam = false
+local telekinesis1 = false
+local espEnabled = false
+
+local startPos
+local startCam
+
+local pickupParts = {}
+local clickDetectors = {}
+local clickLoopId = 0
+local noclipConnection
+
+local espObjects = {}
+local espConnections = {}
+
+-- ==================== PAGE 2 VARIABLES ====================
+local floatMode = false
+local orbitMode = false
+local invisibleMode = false
+local telekinesis2 = false
+
+local tkParts = {}
+local bodyPositions = {}
+local hiddenParts = {}
+local orbitAngle = 0
+
+-- ==================== PAGE TRACKING ====================
+local currentPage = 1
+
+-- ==================== PAGE 1 FUNCTIONS ====================
+local function espOn(plr, char)
+	if plr == p then return end
+	local head = char:FindFirstChild("Head")
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not head or not hum then return end
+	local text = Drawing.new("Text")
+	text.Visible = false
+	text.Center = true
+	text.Outline = false
+	text.Font = 3
+	text.Size = 16
+	text.Color = Color3.fromRGB(170,170,170)
+	local con
+	con = RunService.RenderStepped:Connect(function()
+		if not espEnabled then
+			text.Visible = false
+			return
+		end
+		if not char or not char.Parent then
+			text:Remove()
+			con:Disconnect()
+			return
+		end
+		local pos, vis = cam:WorldToViewportPoint(head.Position)
+		if vis then
+			local hp = math.floor(hum.Health)
+			local maxhp = math.floor(hum.MaxHealth)
+			text.Position = Vector2.new(pos.X, pos.Y - 25)
+			text.Text = "[ " .. plr.Name .. " | " .. hp .. "/" .. maxhp .. " HP ]"
+			text.Visible = true
+		else
+			text.Visible = false
+		end
+	end)
+	espObjects[plr] = text
+	espConnections[plr] = con
+end
+
+local function espOff()
+	for _, obj in pairs(espObjects) do
+		pcall(function()
+			obj:Remove()
+		end)
+	end
+	for _, con in pairs(espConnections) do
+		pcall(function()
+			con:Disconnect()
+		end)
+	end
+	table.clear(espObjects)
+	table.clear(espConnections)
+end
+
+local function register1(v)
+	if v:IsA("ClickDetector") then
+		v.MaxActivationDistance = math.huge
+		clickDetectors[#clickDetectors+1] = v
+	end
+	if v.Name == "ItemPickupScript" or v.Name == "NewItemPickupScript" then
+		local parent = v.Parent
+		if parent then
+			local part = parent:IsA("BasePart") and parent or parent:FindFirstChildWhichIsA("BasePart")
+			if part then
+				pickupParts[#pickupParts+1] = part
+			end
+		end
+	end
+end
+
+for _,v in ipairs(Workspace:GetDescendants()) do
+	register1(v)
+end
+
+Workspace.DescendantAdded:Connect(register1)
+
+local function fireAllClicks(id)
+	while clickSpam and id == clickLoopId do
+		for i = 1, #clickDetectors do
+			local d = clickDetectors[i]
+			if d then
+				fireclickdetector(d)
+			end
+		end
+		RunService.Heartbeat:Wait()
+	end
+end
+
+local function farm()
+	while farmItems do
+		for i = 1, #pickupParts do
+			if not farmItems then break end
+			local part = pickupParts[i]
+			if part and part.Parent then
+				hrp.CFrame = part.CFrame + Vector3.new(0,3,0)
+				local click = part:FindFirstChildOfClass("ClickDetector")
+				if click then
+					fireclickdetector(click)
+					fireclickdetector(click)
+				end
+				RunService.Heartbeat:Wait()
+			end
+		end
+	end
+end
+
+local function noclipLoop()
+	for _,v in ipairs(character:GetChildren()) do
+		if v:IsA("BasePart") then
+			v.CanCollide = false
+		end
+	end
+end
+
+-- ==================== PAGE 2 FUNCTIONS ====================
+local function getGroundY(pos, ignoreList)
+	local origin = pos + Vector3.new(0, 200, 0)
+	local direction = Vector3.new(0, -500, 0)
+	local params = RaycastParams.new()
+	params.FilterType = Enum.RaycastFilterType.Blacklist
+	params.FilterDescendantsInstances = ignoreList or {}
+	local result = Workspace:Raycast(origin, direction, params)
+	if result then
+		return result.Position.Y
+	end
+	return pos.Y
+end
+
+local function createBP(part)
+	local bp = Instance.new("BodyPosition")
+	bp.MaxForce = Vector3.new(1e8, 1e8, 1e8)
+	bp.P = 5e4
+	bp.D = 500
+	bp.Parent = part
+	return bp
+end
+
+local function register2(v)
+	if v:IsA("BasePart") and not v.Anchored then
+		table.insert(tkParts, v)
+		if invisibleMode then
+			if hiddenParts[v] == nil then
+				hiddenParts[v] = v.Transparency
+			end
+			v.Transparency = 1
+		end
+	end
+end
+
+for _, v in ipairs(Workspace:GetDescendants()) do
+	register2(v)
+end
+
+Workspace.DescendantAdded:Connect(register2)
+
+local function clearTK()
+	for part, bp in pairs(bodyPositions) do
+		if bp then bp:Destroy() end
+	end
+	table.clear(bodyPositions)
+end
+
+local function setInvisible(state)
+	if state then
+		for _, part in ipairs(tkParts) do
+			if part and part.Parent and not part.Anchored and not part:IsDescendantOf(character) then
+				if hiddenParts[part] == nil then
+					hiddenParts[part] = part.Transparency
+				end
+				part.Transparency = 1
+			end
+		end
+	else
+		for part, transparency in pairs(hiddenParts) do
+			if part and part.Parent then
+				part.Transparency = transparency
+			end
+		end
+		table.clear(hiddenParts)
+	end
+end
+
+-- ==================== TELEKINESIS SHARED ====================
+RunService.RenderStepped:Connect(function(dt)
+	if not hrp then return end
+	orbitAngle += dt * ORBIT_SPEED
+
+	-- PAGE 1 TELEKINESIS
+	if telekinesis1 then
+		local playerPos = hrp.Position
+		local targetPos = cam.CFrame * CFrame.new(0,0,-DISTANCE)
+		for i = 1, #tkParts do
+			local part = tkParts[i]
+			if part and part.Parent and not part:IsDescendantOf(character) then
+				local dist = (part.Position - playerPos).Magnitude
+				if dist <= PICKUP_RADIUS then
+					local bp = bodyPositions[part]
+					if not bp then
+						bp = createBP(part)
+						bodyPositions[part] = bp
+					end
+					bp.Position = targetPos.Position
+				end
+			end
+		end
+	end
+
+	-- PAGE 2 FLOAT MODE
+	if floatMode then
+		for _, model in ipairs(Workspace:GetChildren()) do
+			if model:IsA("Model")
+				and model ~= character
+				and model:FindFirstChildOfClass("Humanoid")
+				and model:FindFirstChild("HumanoidRootPart") then
+				local root = model.HumanoidRootPart
+				if (root.Position - hrp.Position).Magnitude <= PICKUP_RADIUS then
+					local bp = bodyPositions[root]
+					if not bp then
+						bp = createBP(root)
+						bodyPositions[root] = bp
+					end
+					local groundY = getGroundY(root.Position, {character})
+					local lift = math.clamp(DISTANCE, 0, 5)
+					bp.Position = Vector3.new(
+						root.Position.X,
+						groundY + lift,
+						root.Position.Z
+					)
+				end
+			end
+		end
+	end
+
+	-- PAGE 2 ORBIT MODE
+	if orbitMode then
+		local nearby = {}
+		for _, part in ipairs(tkParts) do
+			if part and part.Parent and not part.Anchored and not part:IsDescendantOf(character) then
+				if (part.Position - hrp.Position).Magnitude <= PICKUP_RADIUS then
+					table.insert(nearby, part)
+				end
+			end
+		end
+		local count = #nearby
+		for i, part in ipairs(nearby) do
+			local bp = bodyPositions[part]
+			if not bp then
+				bp = createBP(part)
+				bodyPositions[part] = bp
+			end
+			local angle = orbitAngle + ((math.pi * 2) / math.max(count, 1)) * i
+			local offset = Vector3.new(
+				math.cos(angle) * DISTANCE,
+				3,
+				math.sin(angle) * DISTANCE
+			)
+			bp.Position = hrp.Position + offset
+		end
+	end
+
+	-- PAGE 2 TELEKINESIS
+	if telekinesis2 then
+		local targetPos = cam.CFrame * CFrame.new(0, 0, -DISTANCE)
+		for i = 1, #tkParts do
+			local part = tkParts[i]
+			if part and part.Parent and not part:IsDescendantOf(character) then
+				if (part.Position - hrp.Position).Magnitude <= PICKUP_RADIUS then
+					local bp = bodyPositions[part]
+					if not bp then
+						bp = createBP(part)
+						bodyPositions[part] = bp
+					end
+					bp.Position = targetPos.Position
+				end
+			end
+		end
+	end
+
+	-- CLEANUP
+	for part, bp in pairs(bodyPositions) do
+		if not part.Parent or (part.Position - hrp.Position).Magnitude > PICKUP_RADIUS then
+			bp:Destroy()
+			bodyPositions[part] = nil
+		end
+	end
+	if not telekinesis1 and not floatMode and not orbitMode and not telekinesis2 then
+		clearTK()
+	end
+end)
+
+-- ==================== UI SETUP ====================
+local UI = Instance.new("ScreenGui")
+UI.Name = "MegaHub"
+UI.ResetOnSpawn = false
+UI.Parent = p:WaitForChild("PlayerGui")
+
+local Main = Instance.new("Frame")
+Main.Parent = UI
+Main.Size = UDim2.new(0, 260, 0, 380) -- Expanded slightly to accommodate the extra button
+Main.Position = UDim2.new(0.5, -130, 0.5, -190)
+Main.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+Main.Active = true
+Main.Draggable = true
+
+local Title = Instance.new("TextLabel")
+Title.Parent = Main
+Title.Size = UDim2.new(1, 0, 0, 30)
+Title.Position = UDim2.new(0, 0, 0, 0)
+Title.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
+Title.TextColor3 = Color3.new(1, 1, 1)
+Title.Font = Enum.Font.GothamBold
+Title.TextSize = 16
+Title.Text = "Mega Hub - Page 1"
+
+local SwitchBtn = Instance.new("TextButton")
+SwitchBtn.Parent = Main
+SwitchBtn.Size = UDim2.new(0, 100, 0, 26)
+SwitchBtn.Position = UDim2.new(1, -110, 0, 2)
+SwitchBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 80)
+SwitchBtn.TextColor3 = Color3.new(1, 1, 1)
+SwitchBtn.Font = Enum.Font.GothamBold
+SwitchBtn.TextSize = 12
+SwitchBtn.Text = "SWITCH >>"
+
+local Page1Frame = Instance.new("Frame")
+Page1Frame.Parent = Main
+Page1Frame.Size = UDim2.new(1, 0, 1, -70)
+Page1Frame.Position = UDim2.new(0, 0, 0, 35)
+Page1Frame.BackgroundTransparency = 1
+
+local Page2Frame = Instance.new("Frame")
+Page2Frame.Parent = Main
+Page2Frame.Size = UDim2.new(1, 0, 1, -70)
+Page2Frame.Position = UDim2.new(0, 0, 0, 35)
+Page2Frame.BackgroundTransparency = 1
+Page2Frame.Visible = false
+
+-- ==================== PAGE 1 TOGGLES ====================
+local page1Toggles = {}
+
+local function makeToggle1(text, y, callback)
+	local btn = Instance.new("TextButton")
+	btn.Parent = Page1Frame
+	btn.Size = UDim2.new(1, -20, 0, 32)
+	btn.Position = UDim2.new(0, 10, 0, y)
+	btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 14
+	btn.Text = text .. " : OFF"
+	local state = false
+	btn.MouseButton1Click:Connect(function()
+		state = not state
+		btn.Text = text .. " : " .. (state and "ON" or "OFF")
+		callback(state)
+	end)
+	page1Toggles[text] = function() return state end
+	return btn
+end
+
+makeToggle1("Item Farm", 10, function(v)
+	farmItems = v
+	if v then task.spawn(farm) end
+end)
+
+makeToggle1("Click Spam", 50, function(v)
+	clickSpam = v
+	clickLoopId += 1
+	if v then task.spawn(fireAllClicks, clickLoopId) end
+end)
+
+makeToggle1("Ghost Cam", 90, function(v)
+	ghostCam = v
+	if v then
+		startPos = hrp.CFrame
+		startCam = cam.CFrame
+		cam.CameraType = Enum.CameraType.Scriptable
+		cam.CFrame = startCam
+	else
+		cam.CameraType = Enum.CameraType.Custom
+		if startPos then hrp.CFrame = startPos end
+	end
+end)
+
+makeToggle1("Telekinesis", 130, function(v)
+	telekinesis1 = v
+	if v then
+		noclipConnection = RunService.Stepped:Connect(noclipLoop)
+	else
+		if noclipConnection then noclipConnection:Disconnect() end
+	end
+end)
+
+makeToggle1("ESP", 170, function(v)
+	espEnabled = v
+	if v then
+		for _, plr in ipairs(Players:GetPlayers()) do
+			if plr ~= p and plr.Character then
+				espOn(plr, plr.Character)
+			end
+			plr.CharacterAdded:Connect(function(c)
+				if espEnabled then
+					task.wait(1)
+					espOn(plr, c)
+				end
+			end)
+		end
+	else
+		espOff()
+	end
+end)
+
+local distLabel1 = Instance.new("TextLabel")
+distLabel1.Parent = Page1Frame
+distLabel1.Position = UDim2.new(0, 10, 0, 215)
+distLabel1.Size = UDim2.new(0, 120, 0, 30)
+distLabel1.Text = "Distance (max 50)"
+distLabel1.BackgroundTransparency = 1
+distLabel1.TextColor3 = Color3.new(1, 1, 1)
+distLabel1.Font = Enum.Font.Gotham
+distLabel1.TextSize = 14
+
+distInput1 = Instance.new("TextBox")
+distInput1.Parent = Page1Frame
+distInput1.Position = UDim2.new(0, 130, 0, 215)
+distInput1.Size = UDim2.new(0, 80, 0, 28)
+distInput1.Text = tostring(DISTANCE)
+distInput1.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+distInput1.TextColor3 = Color3.new(1, 1, 1)
+
+distInput1.FocusLost:Connect(function()
+	local num = tonumber(distInput1.Text)
+	if num then
+		if num < 1 then num = 1 end
+		if num > 50 then num = 50 end
+		DISTANCE = num
+	end
+	distInput1.Text = tostring(DISTANCE)
+	if distInput2 then distInput2.Text = tostring(DISTANCE) end
+end)
+
+-- ==================== NEW LOADMAINLOADER BUTTON ====================
+local LoadLoaderBtn = Instance.new("TextButton")
+LoadLoaderBtn.Parent = Page1Frame
+LoadLoaderBtn.Size = UDim2.new(1, -20, 0, 32)
+LoadLoaderBtn.Position = UDim2.new(0, 10, 0, 255)
+LoadLoaderBtn.BackgroundColor3 = Color3.fromRGB(70, 40, 100) -- Distinct color
+LoadLoaderBtn.TextColor3 = Color3.new(1, 1, 1)
+LoadLoaderBtn.Font = Enum.Font.GothamBold
+LoadLoaderBtn.TextSize = 14
+LoadLoaderBtn.Text = "Load MainLoader"
+
+LoadLoaderBtn.MouseButton1Click:Connect(function()
+	loadstring(game:HttpGet("https://raw.githubusercontent.com/VoidScriptzz/Idkbs/refs/heads/main/MainLoader"))()
+end)
+
+-- ==================== PAGE 2 TOGGLES ====================
+local page2Toggles = {}
+
+local function makeToggle2(text, y, callback)
+	local btn = Instance.new("TextButton")
+	btn.Parent = Page2Frame
+	btn.Size = UDim2.new(1, -20, 0, 32)
+	btn.Position = UDim2.new(0, 10, 0, y)
+	btn.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+	btn.TextColor3 = Color3.new(1, 1, 1)
+	btn.Font = Enum.Font.GothamBold
+	btn.TextSize = 14
+	btn.Text = text .. " : OFF"
+	local state = false
+	btn.MouseButton1Click:Connect(function()
+		state = not state
+		btn.Text = text .. " : " .. (state and "ON" or "OFF")
+		callback(state)
+	end)
+	page2Toggles[text] = function() return state end
+	return btn
+end
+
+makeToggle2("Float NPCs", 10, function(v)
+	floatMode = v
+	if v then orbitMode = false telekinesis2 = false end
+end)
+
+makeToggle2("Orbit Parts", 50, function(v)
+	orbitMode = v
+	if v then floatMode = false telekinesis2 = false end
+end)
+
+makeToggle2("Telekinesis", 90, function(v)
+	telekinesis2 = v
+	if v then floatMode = false orbitMode = false end
+end)
+
+makeToggle2("Invisible Parts", 130, function(v)
+	invisibleMode = v
+	setInvisible(v)
+end)
+
+local distLabel2 = Instance.new("TextLabel")
+distLabel2.Parent = Page2Frame
+distLabel2.Position = UDim2.new(0, 10, 0, 175)
+distLabel2.Size = UDim2.new(0, 120, 0, 30)
+distLabel2.Text = "Distance (0-250)"
+distLabel2.BackgroundTransparency = 1
+distLabel2.TextColor3 = Color3.new(1, 1, 1)
+distLabel2.Font = Enum.Font.Gotham
+distLabel2.TextSize = 14
+
+distInput2 = Instance.new("TextBox")
+distInput2.Parent = Page2Frame
+distInput2.Position = UDim2.new(0, 130, 0, 175)
+distInput2.Size = UDim2.new(0, 80, 0, 28)
+distInput2.Text = tostring(DISTANCE)
+distInput2.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+distInput2.TextColor3 = Color3.new(1, 1, 1)
+
+distInput2.FocusLost:Connect(function()
+	local num = tonumber(distInput2.Text)
+	if num then
+		DISTANCE = math.clamp(num, 0, 250)
+	end
+	distInput2.Text = tostring(DISTANCE)
+	if distInput1 then distInput1.Text = tostring(DISTANCE) end
+end)
+
+local speedLabel = Instance.new("TextLabel")
+speedLabel.Parent = Page2Frame
+speedLabel.Position = UDim2.new(0, 10, 0, 215)
+speedLabel.Size = UDim2.new(0, 120, 0, 30)
+speedLabel.Text = "Orbit Speed"
+speedLabel.BackgroundTransparency = 1
+speedLabel.TextColor3 = Color3.new(1, 1, 1)
+speedLabel.Font = Enum.Font.Gotham
+speedLabel.TextSize = 14
+
+local speedInput = Instance.new("TextBox")
+speedInput.Parent = Page2Frame
+speedInput.Position = UDim2.new(0, 130, 0, 215)
+speedInput.Size = UDim2.new(0, 80, 0, 28)
+speedInput.Text = tostring(ORBIT_SPEED)
+speedInput.BackgroundColor3 = Color3.fromRGB(60, 60, 60)
+speedInput.TextColor3 = Color3.new(1, 1, 1)
+
+speedInput.FocusLost:Connect(function()
+	local num = tonumber(speedInput.Text)
+	if num then
+		ORBIT_SPEED = math.clamp(num, 0, 50)
+	end
+	speedInput.Text = tostring(ORBIT_SPEED)
+end)
+
+-- ==================== SWITCH FUNCTIONALITY ====================
+SwitchBtn.MouseButton1Click:Connect(function()
+	if currentPage == 1 then
+		currentPage = 2
+		Page1Frame.Visible = false
+		Page2Frame.Visible = true
+		Title.Text = "Mega Hub - Page 2"
+		SwitchBtn.Text = "<< SWITCH"
+		Main.Size = UDim2.new(0, 260, 0, 300)
+		Main.Position = UDim2.new(0.5, -130, 0.5, -150)
+	else
+		currentPage = 1
+		Page2Frame.Visible = false
+		Page1Frame.Visible = true
+		Title.Text = "Mega Hub - Page 1"
+		SwitchBtn.Text = "SWITCH >>"
+		Main.Size = UDim2.new(0, 260, 0, 380)
+		Main.Position = UDim2.new(0.5, -130, 0.5, -190)
+	end
+end)
